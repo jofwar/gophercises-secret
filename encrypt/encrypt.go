@@ -6,10 +6,16 @@ import (
 	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha256"
+	"encoding/base64"
+	"errors"
 	"io"
 )
 
-func Encrypt(key []byte, value string) (cipherstring, auth string, err error) {
+// ErrCipherMismatch Public error
+var ErrCipherMismatch = errors.New("encrypt: cipher and authorization does not match.")
+var ErrCipherTooShort = errors.New("encrypt: cipher too short")
+
+func Encrypt(key []byte, value string) (cipherString, auth string, err error) {
 	// Load your secret key from a safe place and reuse it across multiple
 	// NewCipher calls. (Obviously don't use this example key for anything
 	// real.) If you want to convert a passphrase to a key, use a suitable
@@ -19,7 +25,7 @@ func Encrypt(key []byte, value string) (cipherstring, auth string, err error) {
 
 	block, err := aes.NewCipher(key)
 	if err != nil {
-		panic(err)
+		return "", "", err
 	}
 
 	// The IV needs to be unique, but not secure. Therefore it's common to
@@ -27,7 +33,7 @@ func Encrypt(key []byte, value string) (cipherstring, auth string, err error) {
 	ciphertext := make([]byte, aes.BlockSize+len(value))
 	iv := ciphertext[:aes.BlockSize]
 	if _, err := io.ReadFull(rand.Reader, iv); err != nil {
-		panic(err)
+		return "", "", err
 	}
 
 	stream := cipher.NewCFBEncrypter(block, iv)
@@ -43,10 +49,29 @@ func Encrypt(key []byte, value string) (cipherstring, auth string, err error) {
 	mac.Write(ciphertext)
 	expectedMAC := mac.Sum(nil)
 
-	return string(ciphertext), string(expectedMAC), nil
+	auth = base64.URLEncoding.EncodeToString(expectedMAC)
+	cipherString = base64.URLEncoding.EncodeToString(ciphertext)
+
+	return cipherString, auth, nil
 }
 
-func Decrypt(key []byte, ciphertext string) string {
+func Decrypt(key []byte, cipherString, auth string) (string, error) {
+
+	cipherBytes, err := base64.URLEncoding.DecodeString(cipherString)
+	if err != nil {
+		return "", err
+	}
+
+	authBytes, err := base64.URLEncoding.DecodeString(auth)
+	if err != nil {
+		return "", err
+	}
+
+	// Verify the authentication string
+	match := checkMAC(key, cipherBytes, authBytes)
+	if !match {
+		return "", ErrCipherMismatch
+	}
 	// Load your secret key from a safe place and reuse it across multiple
 	// NewCipher calls. (Obviously don't use this example key for anything
 	// real.) If you want to convert a passphrase to a key, use a suitable
@@ -61,16 +86,22 @@ func Decrypt(key []byte, ciphertext string) string {
 
 	// The IV needs to be unique, but not secure. Therefore it's common to
 	// include it at the beginning of the ciphertext.
-	if len(ciphertext) < aes.BlockSize {
-		panic("ciphertext too short")
+	if len(cipherBytes) < aes.BlockSize {
+		return "", ErrCipherTooShort
 	}
-	iv := []byte(ciphertext[:aes.BlockSize])
-	ciphertext = ciphertext[aes.BlockSize:]
+	iv := cipherBytes[:aes.BlockSize]
+	cipherBytes = cipherBytes[aes.BlockSize:]
 
 	stream := cipher.NewCFBDecrypter(block, iv)
 
 	// XORKeyStream can work in-place if the two arguments are the same.
-	stream.XORKeyStream([]byte(ciphertext), []byte(ciphertext))
+	stream.XORKeyStream(cipherBytes, cipherBytes)
+	return string(cipherBytes), nil
+}
 
-	return ""
+func checkMAC(key, message, messageMAC []byte) bool {
+	mac := hmac.New(sha256.New, key)
+	mac.Write(message)
+	expectedMAC := mac.Sum(nil)
+	return hmac.Equal(messageMAC, expectedMAC)
 }
